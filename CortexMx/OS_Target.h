@@ -4,7 +4,7 @@
 //*
 //*     NICKNAME:  scmRTOS
 //*
-//*     PROCESSOR: ARM Cortex-M4(F)
+//*     PROCESSOR: ARM Cortex-M0(+), Cortex-M1, Cortex-M3, Cortex-M4(F)
 //*
 //*     TOOLKIT:   ARM GCC
 //*
@@ -12,8 +12,8 @@
 //*
 //*     Version: 4.00
 //*
-//*     $Revision: 557 $
-//*     $Date:: 2012-12-03 #$
+//*     $Revision: 584 $
+//*     $Date:: 2015-03-30 #$
 //*
 //*     Copyright (c) 2003-2012, Harry E. Zhurov
 //*
@@ -42,10 +42,11 @@
 //*     =================================================================
 //*
 //******************************************************************************
-//*     Cortex-M4(F) GCC port by Anton B. Gusev aka AHTOXA, Copyright (c) 2012
+//*     Cortex-M3/M4(F) GCC port by Anton B. Gusev aka AHTOXA, Copyright (c) 2012
+//*     Cortex-M0 port by Sergey A. Borshch, Copyright (c) 2011
 
-#ifndef scmRTOS_CORTEXM3_H
-#define scmRTOS_CORTEXM3_H
+#ifndef scmRTOS_CORTEXM4_H
+#define scmRTOS_CORTEXM4_H
 
 //------------------------------------------------------------------------------
 //
@@ -56,8 +57,8 @@
 #error "This file should only be compiled with GNU C++ Compiler"
 #endif // __GNUC__
 
-#if (!defined __ARM_ARCH_7M__) && (!defined __ARM_ARCH_7EM__)
-#error "This file must be compiled for ARMv7-M (Cortex-M3) and ARMv7E-M (Cortex-M4) processors only."
+#if (!defined __ARM_ARCH_7M__) && (!defined __ARM_ARCH_7EM__) && (!defined __ARM_ARCH_6M__)
+#error "This file must be compiled for ARMv6-M (Cortex-M0(+)), ARMv7-M (Cortex-M3) and ARMv7E-M (Cortex-M4(F)) processors only."
 #endif
 
 #if (__GNUC__ < 3)
@@ -105,9 +106,9 @@ typedef uint32_t status_reg_t;
 #define SEPARATE_RETURN_STACK   0
 
 //-----------------------------------------------------------------------------
-// Software interrupt stack switching not supported in Cortex-M3 port
+// Software interrupt stack switching not supported in Cortex-M port
 // because processor implements hardware stack switching.
-// So, system timer isr wrapper can't be chosen at project level
+// So, system timer ISR wrapper can't be chosen at project level
 //
 #define scmRTOS_ISRW_TYPE       TISRW
 
@@ -119,9 +120,30 @@ typedef uint32_t status_reg_t;
 //    switch in the scheduler and in the OS ISRs. This is the primary method.
 //    Value 1 sets the second way to switch context - by using of software
 //    interrupt. See documentation for details.
-//    Cortex-M3 port supports software interrupt switch method only.
+//    Cortex-M port supports software interrupt switch method only.
 //
 #define  scmRTOS_CONTEXT_SWITCH_SCHEME 1
+
+//-----------------------------------------------------------------------------
+//
+//    scmRTOS Priority Order
+//
+//    This macro defines the order of the process's priorities. Default,
+//    the ascending order is used. Alternatively, the descending priority
+//    order can be used. On some platforms the descending order is preferred
+//    because of performance.
+//
+//    Default (corresponding to ascending order) value of macro is 0.
+//    Alternative (corresponding to descending order) value of macro is 1.
+//
+//    On Cortex-M3/M4 the descending order is used for performance reason.
+//    Cortex-M0 lacks CLZ instruction, so only ascending order is implemented for it.
+//
+#if (defined __ARM_ARCH_6M__)
+#define  scmRTOS_PRIORITY_ORDER             0
+#else
+#define  scmRTOS_PRIORITY_ORDER             1
+#endif
 
 //-----------------------------------------------------------------------------
 //
@@ -198,19 +220,15 @@ private:
 //   context_switch_hook() run in critical section.
 // 
 //   This is useful (and necessary) when target processor has hardware 
-//   enabled nested interrups.
+//   enabled nested interrupts.
 //   User can define own macros using user-defined TCritSect capabilities.
 //
-//   Cortex-M3 have nested interrupts but interrupts are disabled
+//   Cortex-M have nested interrupts but interrupts are disabled
 //   during context switch ISR. So, critical section is needed
 //   for system timer routine and not needed for context switcher.
 // 
-#ifndef SYS_TIMER_CRIT_SECT
 #define SYS_TIMER_CRIT_SECT() TCritSect cs
-#endif
-#ifndef CONTEXT_SWITCH_HOOK_CRIT_SECT
-#define CONTEXT_SWITCH_HOOK_CRIT_SECT() // TCritSect cs
-#endif
+#define CONTEXT_SWITCH_HOOK_CRIT_SECT()
 
 
 //-----------------------------------------------------------------------------
@@ -225,14 +243,21 @@ INLINE OS::TProcessMap get_prio_tag(const uint_fast8_t pr) { return static_cast<
 #if scmRTOS_PRIORITY_ORDER == 0
     INLINE uint_fast8_t highest_priority(TProcessMap pm)
     {
-        uint_fast8_t pr = 0;
+        extern TPriority const PriorityTable[];
 
-        while( !(pm & 0x0001) )
-        {
-            pr++;
-            pm >>= 1;
-        }
-        return pr;
+        #if scmRTOS_PROCESS_COUNT < 6
+            return PriorityTable[pm];
+        #else
+            uint32_t x = pm;
+            x = x & -x;                             // Isolate rightmost 1-bit.
+
+                                                // x = x * 0x450FBAF
+            x = (x << 4) | x;                       // x = x*17.
+            x = (x << 6) | x;                       // x = x*65.
+            x = (x << 16) - x;                      // x = x*65535.
+
+            return PriorityTable[x >> 26];
+        #endif  // scmRTOS_PROCESS_COUNT < 6
     }
 #else
     INLINE uint_fast8_t highest_priority(TProcessMap pm)
@@ -289,9 +314,9 @@ namespace OS
     // TISRW_SS declared to be the same as TISRW for porting compatibility
     #define TISRW_SS    TISRW
 
-} // ns OS
+} // namespace OS
 //-----------------------------------------------------------------------------
 
-#endif // scmRTOS_CORTEXM3_H
+#endif // scmRTOS_CORTEXM4_H
 //-----------------------------------------------------------------------------
 

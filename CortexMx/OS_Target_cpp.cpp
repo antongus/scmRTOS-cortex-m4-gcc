@@ -4,7 +4,7 @@
 //*
 //*     NICKNAME:  scmRTOS
 //*
-//*     PROCESSOR: ARM Cortex-M4(F)
+//*     PROCESSOR: ARM Cortex-M0(+), Cortex-M1, Cortex-M3, Cortex-M4(F)
 //*
 //*     TOOLKIT:   ARM GCC
 //*
@@ -12,8 +12,8 @@
 //*
 //*     Version: 4.00
 //*
-//*     $Revision: 560 $
-//*     $Date:: 2012-12-06 #$
+//*     $Revision: 584 $
+//*     $Date:: 2015-03-30 #$
 //*
 //*     Copyright (c) 2003-2012, Harry E. Zhurov
 //*
@@ -42,19 +42,26 @@
 //*     =================================================================
 //*
 //******************************************************************************
-//*     Cortex-M4(F) GCC port by Anton B. Gusev aka AHTOXA, Copyright (c) 2012
+//*     Cortex-M3/M4(F) GCC port by Anton B. Gusev aka AHTOXA, Copyright (c) 2012
+//*     Cortex-M0 port by Sergey A. Borshch, Copyright (c) 2011
 
 
 #include <scmRTOS.h>
+
+/*
+ * M0(+) core : __ARM_ARCH_6M__ defined.
+ * M3 core    : __SOFTFP__ defined, __ARM_ARCH_6M__ not defined.
+ * M4F core   : __SOFTFP__ not defined.
+ */
 
 using namespace OS;
 
 namespace{
 enum {
 #if (defined __SOFTFP__)
-    CONTEXT_SIZE = 16 * sizeof(stack_item_t)   // Cortex-M3/M4 context size
+    CONTEXT_SIZE = 16 * sizeof(stack_item_t)   // Cortex-M0/M0+/M3/M4 context size
 #else
-    CONTEXT_SIZE = 17 * sizeof(stack_item_t)   // Cortex-M4F initial context size
+    CONTEXT_SIZE = 17 * sizeof(stack_item_t)   // Cortex-M4F initial context size (without FPU context)
 #endif
 };
 }
@@ -76,9 +83,9 @@ void TBaseProcess::init_stack_frame( stack_item_t * Stack
 
     *(--StackPointer)  = 0x01000000UL;      // xPSR
     *(--StackPointer)  = reinterpret_cast<uint32_t>(exec); // Entry Point
-#if (defined __SOFTFP__)
+#if (defined __SOFTFP__)    // core without FPU
     StackPointer -= 14;                     // emulate "push LR,R12,R3,R2,R1,R0,R11-R4"
-#else
+#else                       // core with FPU
     StackPointer -= 6;                      // emulate "push LR,R12,R3,R2,R1,R0"
     *(--StackPointer)  = 0xFFFFFFFDUL;      // exc_return: Return to Thread mode, floating-point context inactive, execution uses PSP after return.
     StackPointer -= 8;                      // emulate "push R4-R11"
@@ -91,8 +98,8 @@ void TBaseProcess::init_stack_frame( stack_item_t * Stack
 }
 
 /*
- * PendSV is used to perform a context switch. This is a recommended method for Cortex-M3/M4.
- * This is because the Cortex-M3/M4 automatically saves half of the processor context
+ * PendSV is used to perform a context switch. This is a recommended method for Cortex-M.
+ * This is because the Cortex-M automatically saves half of the processor context
  * on any exception, and restores same on return from exception.  So only saving of R4-R11
  * and fixing up the stack pointers is required.  Using the PendSV exception this way means
  * that context saving and restoring is identical whether it is initiated from a thread
@@ -102,11 +109,43 @@ void TBaseProcess::init_stack_frame( stack_item_t * Stack
  * we can be sure that it will run only when no other exception or interrupt is active, and
  * therefore safe to assume that context being switched out was using the process stack (PSP).
  */
+extern "C" void PendSV_Handler()
+{
+#if (defined __ARM_ARCH_6M__)   // Cortex-M0(+)/Cortex-M1
+    asm volatile (
+        "    CPSID   I                 \n"  // Prevent interruption during context switch
+        "    MRS     R0, PSP           \n"  // Load process stack pointer to R0
+        "    SUB     R0, R0, #32       \n"  // Adjust R0 to point to top of saved context in stack
+        "    MOV     R1, R0            \n"  // Preserve R0 (needed for os_context_switch_hook() call)
+        "    STMIA   R1!, {R4-R7}      \n"  // Save low portion of remaining registers (r4-7) on process stack
+        "    MOV     R4, R8            \n"  // Move high portion of remaining registers (r8-11) to low registers
+        "    MOV     R5, R9            \n"
+        "    MOV     R6, R10           \n"
+        "    MOV     R7, R11           \n"
+        "    STMIA   R1!, {R4-R7}      \n"  // Save high portion of remaining registers (r8-11) on process stack
+
+        // At this point, entire context of process has been saved
+        "    PUSH    {LR}              \n" // we must save LR (exc_return value) until exception return
+        "    BL      os_context_switch_hook  \n" // call os_context_switch_hook();
+
+        // R0 is new process SP;
+        "    ADD     R0, R0, #16       \n" // Adjust R0 to point to high registers (r8-11)
+        "    LDMIA   R0!, {R4-R7}      \n" // Restore r8-11 from new process stack
+        "    MOV     R8, R4            \n" // Move restored values to high registers (r8-11)
+        "    MOV     R9, R5            \n"
+        "    MOV     R10, R6           \n"
+        "    MOV     R11, R7           \n"
+        "    MSR     PSP, R0           \n" // R0 at this point is new process SP
+        "    SUB     R0, R0, #32       \n" // Adjust R0 to point to low registers
+        "    LDMIA   R0!, {R4-R7}      \n" // Restore r4-7
+        "    CPSIE   I                 \n"
+        "    POP     {PC}              \n" // Return to saved exc_return. Exception return will restore remaining context
+        : :
+    );
+#else  // #if (defined __ARM_ARCH_6M__)
 
 #if (defined __SOFTFP__)
-// This function used for CPU without FPU (cortex-M3, cortex-M4)
-extern "C" void PendSVC_ISR()
-{
+    // M3/M4 cores without FPU
     asm volatile (
         "    CPSID   I                 \n" // Prevent interruption during context switch
         "    MRS     R0, PSP           \n" // PSP is process stack pointer
@@ -123,11 +162,9 @@ extern "C" void PendSVC_ISR()
         "    POP     {PC}              \n" // Return to saved exc_return. Exception return will restore remaining context
         : :
     );
-}
+
 #else // #if (defined __SOFTFP__)
-// This function used for CPU with FPU (cortex-M4F)
-extern "C" void PendSVC_ISR()
-{
+    // Core with FPU (cortex-M4F)
     asm volatile (
         "    CPSID     I                 \n" // Prevent interruption during context switch
         "    MRS       R0, PSP           \n" // PSP is process stack pointer
@@ -149,11 +186,15 @@ extern "C" void PendSVC_ISR()
         "    BX        LR                \n" // Return to saved exc_return. Exception return will restore remaining context
         : :
     );
+#endif  // #if (defined __SOFTFP__)
+#endif  // #if (defined __ARM_ARCH_6M__)
 }
-#endif
+
+// weak alias to support old name of PendSV_Handler.
+#pragma weak PendSVC_ISR = PendSV_Handler
 
 /*
- * Some Cortex-M3/M4(F) registers and constants.
+ * Some Cortex-MX registers and constants.
  */
 namespace
 {
@@ -161,16 +202,16 @@ namespace
 template<uint32_t addr, typename type = uint32_t>
 struct ioregister_t
 {
-	type operator=(type value) { *(volatile type*)addr = value; return value; }
-	void operator|=(type value) { *(volatile type*)addr |= value; }
-	void operator&=(type value) { *(volatile type*)addr &= value; }
-	operator type() { return *(volatile type*)addr; }
+    type operator=(type value) { *(volatile type*)addr = value; return value; }
+    void operator|=(type value) { *(volatile type*)addr |= value; }
+    void operator&=(type value) { *(volatile type*)addr &= value; }
+    operator type() { return *(volatile type*)addr; }
 };
 
 template<uint32_t addr, class T>
 struct iostruct_t
 {
-	volatile T* operator->() { return (volatile T*)addr; }
+    volatile T* operator->() { return (volatile T*)addr; }
 };
 
 // PendSV and SysTick priority registers
@@ -193,15 +234,15 @@ enum
     NVIC_ST_CTRL_ENABLE  = 0x00000001        // Counter mode.
 };
 
-systick_t volatile * const SysTick = (systick_t volatile * const)0xE000E010UL;
+static iostruct_t<0xE000E010UL, systick_t> SysTick;
 
 #if (!defined __SOFTFP__)
 // Floating point context control register stuff
 static ioregister_t<0xE000EF34UL> FPCCR;
 enum
 {
-	ASPEN =   (0x1UL << 31),  // always save enable
-	LSPEN =   (0x1UL << 30)   // lazy save enable
+    ASPEN =   (0x1UL << 31),  // always save enable
+    LSPEN =   (0x1UL << 30)   // lazy save enable
 };
 #endif
 
@@ -212,7 +253,9 @@ enum
  * This is the default (weak) system timer ISR handler.
  * The user can redefine this handler if needed.
  */
+#pragma weak SysTick_Handler = Default_SystemTimer_ISR
 #pragma weak SystemTimer_ISR = Default_SystemTimer_ISR
+
 namespace OS
 {
 extern "C" OS_INTERRUPT void Default_SystemTimer_ISR()
@@ -281,3 +324,60 @@ extern "C" NORETURN void os_start(stack_item_t *sp)
     );
     __builtin_unreachable(); // suppress compiler warning "'noreturn' func does return"
 }
+
+#if scmRTOS_PRIORITY_ORDER == 0
+namespace OS
+{
+    extern TPriority const PriorityTable[] =
+    {
+        #if scmRTOS_PROCESS_COUNT == 1
+            (TPriority)0xFF,
+            pr0,
+            prIDLE, pr0
+        #elif scmRTOS_PROCESS_COUNT == 2
+            (TPriority)0xFF,
+            pr0,
+            pr1, pr0,
+            prIDLE, pr0, pr1, pr0
+        #elif scmRTOS_PROCESS_COUNT == 3
+            (TPriority)0xFF,
+            pr0,
+            pr1, pr0,
+            pr2, pr0, pr1, pr0,
+            prIDLE, pr0, pr1, pr0, pr2, pr0, pr1, pr0
+        #elif scmRTOS_PROCESS_COUNT == 4
+            (TPriority)0xFF,
+            pr0,
+            pr1, pr0,
+            pr2, pr0, pr1, pr0,
+            pr3, pr0, pr1, pr0, pr2, pr0, pr1, pr0,
+            prIDLE, pr0, pr1, pr0, pr2, pr0, pr1, pr0, pr3, pr0, pr1, pr0, pr2, pr0, pr1, pr0
+        #elif scmRTOS_PROCESS_COUNT == 5
+            (TPriority)0xFF,
+            pr0,
+            pr1, pr0,
+            pr2, pr0, pr1, pr0,
+            pr3, pr0, pr1, pr0, pr2, pr0, pr1, pr0,
+            pr4, pr0, pr1, pr0, pr2, pr0, pr1, pr0, pr3, pr0, pr1, pr0, pr2, pr0, pr1, pr0,
+            prIDLE, pr0, pr1, pr0, pr2, pr0, pr1, pr0, pr3, pr0, pr1, pr0, pr2, pr0, pr1, pr0, pr4, pr0, pr1, pr0, pr2, pr0, pr1, pr0, pr3, pr0, pr1, pr0, pr2, pr0, pr1, pr0
+        #else // scmRTOS_PROCESS_COUNT > 5
+            (TPriority)32,      (TPriority)0,       (TPriority)1,       (TPriority)12,
+            (TPriority)2,       (TPriority)6,       (TPriority)0xFF,    (TPriority)13,
+            (TPriority)3,       (TPriority)0xFF,    (TPriority)7,       (TPriority)0xFF,
+            (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)14,
+            (TPriority)10,      (TPriority)4,       (TPriority)0xFF,    (TPriority)0xFF,
+            (TPriority)8,       (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)25,
+            (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)0xFF,
+            (TPriority)0xFF,    (TPriority)21,      (TPriority)27,      (TPriority)15,
+            (TPriority)31,      (TPriority)11,      (TPriority)5,       (TPriority)0xFF,
+            (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)0xFF,
+            (TPriority)9,       (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)24,
+            (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)20,      (TPriority)26,
+            (TPriority)30,      (TPriority)0xFF,    (TPriority)0xFF,    (TPriority)0xFF,
+            (TPriority)0xFF,    (TPriority)23,      (TPriority)0xFF,    (TPriority)19,
+            (TPriority)29,      (TPriority)0xFF,    (TPriority)22,      (TPriority)18,
+            (TPriority)28,      (TPriority)17,      (TPriority)16,      (TPriority)0xFF
+        #endif  // scmRTOS_PROCESS_COUNT
+    };
+}   //namespace
+#endif
