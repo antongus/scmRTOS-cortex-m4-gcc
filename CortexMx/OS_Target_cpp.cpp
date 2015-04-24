@@ -12,8 +12,8 @@
 //*
 //*     Version: 4.00
 //*
-//*     $Revision: 587 $
-//*     $Date:: 2015-04-20 #$
+//*     $Revision: 588 $
+//*     $Date:: 2015-04-25 #$
 //*
 //*     Copyright (c) 2003-2012, Harry E. Zhurov
 //*
@@ -294,7 +294,7 @@ extern "C" OS_INTERRUPT void Default_SystemTimer_ISR()
 
 namespace
 {
-enum { SYS_TIMER_PRIORITY = (0xFEUL << (8-(CORE_PRIORITY_BITS))) };
+enum { SYS_TIMER_PRIORITY = ((0xFEUL << (8-(CORE_PRIORITY_BITS))) & 0xFF) };
 }
 
 #pragma weak __init_system_timer
